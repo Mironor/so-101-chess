@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# uv / packaging
+.venv/
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store

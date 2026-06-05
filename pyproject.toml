@@ -1,0 +1,18 @@
+[project]
+name = "so-101-chess"
+version = "0.1.0"
+description = "Chess robot using SO-101 arm"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "feetech-servo-sdk>=1.0.0",
+    "lerobot>=0.5.1",
+    "python-can>=4.6.1",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
