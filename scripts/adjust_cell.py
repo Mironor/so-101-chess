@@ -1,28 +1,23 @@
 """
-Interactive cell position adjuster. Steps through a column, adjusts each cell, saves to cells.json.
-Usage: uv run python adjust_cell.py d
+Interactive cell position adjuster. Adjusts x/y of each cell and saves to cells_ik.json.
+Usage: uv run python scripts/adjust_cell.py
 
-  a / z  →  shoulder_pan   +/-
-  w / s  →  shoulder_lift  +/-
-  e / d  →  elbow_flex     +/-
-  r / f  →  wrist_flex     +/-
-  u / j  →  wrist_roll     +/-
-  t      →  test sequence at current position
-  Enter  →  save and move to next cell
+  w / s  →  x  +/-  (further / closer)
+  a / d  →  y  +/-  (left / right)
+  t      →  test pick & place at current position
+  Enter  →  save and ask for next cell
   q      →  quit without saving current cell
 """
 
 import json
 import sys
 import termios
-import time
 import tty
 
-from utils.config import CELLS_FILE, GRIPPER_OPEN, GRIPPER_CLOSED
-from utils.robot import make_robot, send, gripper, peck_pos
+from utils.config import CELLS_IK_FILE
+from utils.robot import make_robot, connect_robot, move_to_xyz, pick, place, read_joints, move_to_rest
 
-STEP = 1.0
-ARM_JOINTS = {"shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"}
+STEP = 0.001  # metres per key press (1 mm)
 
 
 def getch():
@@ -35,67 +30,41 @@ def getch():
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-def test_sequence(robot, pos: dict):
-    print("\n  [test] open maw...", flush=True)
-    gripper(robot, GRIPPER_OPEN)
-    time.sleep(1.0)
-
-    print("  [test] plock down...", flush=True)
-    send(robot, peck_pos(pos))
-    time.sleep(1.0)
-
-    print("  [test] close maw...", flush=True)
-    gripper(robot, GRIPPER_CLOSED)
-    time.sleep(0.5)
-
-    load = robot.bus.read("Present_Load", "gripper")
-    actual = robot.get_observation()["gripper.pos"]
-    detected = actual > GRIPPER_CLOSED + 3.0
-    print(f"  [test] load={load}  gripper_pos={actual:.2f} (commanded {GRIPPER_CLOSED})  {'PIECE DETECTED' if detected else 'no piece'}", flush=True)
-
-    print("  [test] up...", flush=True)
-    send(robot, pos)
-    time.sleep(1.0)
-
-    print("  [test] down...", flush=True)
-    send(robot, peck_pos(pos))
-    time.sleep(1.0)
-
-    print("  [test] open maw...", flush=True)
-    gripper(robot, GRIPPER_OPEN)
-    time.sleep(0.5)
-
-    print("  [test] up...", flush=True)
-    send(robot, pos)
-    time.sleep(1.0)
-
-    print("  [test] open maw...", flush=True)
-    gripper(robot, GRIPPER_OPEN)
-    time.sleep(0.5)
-
-    print("  [test] done.", flush=True)
-
-
 def print_state(pos: dict):
     print(
-        f"\r  shoulder_pan {pos['shoulder_pan']:7.2f} [a/z]  "
-        f"shoulder_lift {pos['shoulder_lift']:7.2f} [w/s]  "
-        f"elbow_flex {pos['elbow_flex']:7.2f} [e/d]  "
-        f"wrist_flex {pos['wrist_flex']:7.2f} [r/f]  "
-        f"wrist_roll {pos['wrist_roll']:7.2f} [u/j]     ",
+        f"\r  x {pos['x']:8.4f} [w/s]   y {pos['y']:8.4f} [a/d]     ",
         end="", flush=True,
     )
 
 
+def test_sequence(robot, pos: dict):
+    all_cells = json.loads(CELLS_IK_FILE.read_text())
+    move_to_xyz(robot, all_cells["a1"])
+    cells = {"_": pos}
+    pick(robot, cells, "_")
+    place(robot, cells, "_")
+
+
+def ask_cell() -> str:
+    while True:
+        raw = input("Cell to adjust (e.g. d4, or Enter to quit): ").strip().lower()
+        if raw == "":
+            return ""
+        if len(raw) == 2 and raw[0] in "abcdefgh" and raw[1] in "12345678":
+            return raw
+        print("  Invalid cell, expected e.g. d4")
+
+
 def adjust_cell(robot, cells, cell) -> bool:
     if cell not in cells:
-        print(f"Cell '{cell}' not found in {CELLS_FILE}, skipping.")
+        print(f"Cell '{cell}' not found, skipping.")
         return True
 
     pos = dict(cells[cell])
-    send(robot, pos)
+    move_to_xyz(robot, pos)
+    pos["hint"] = read_joints(robot)
 
-    print(f"\nAdjusting [{cell}]  —  t=test  Enter=save & next  q=quit")
+    print(f"\nAdjusting [{cell}]  —  w/s=x  a/d=y  t=test  Enter=save  q=quit")
     print_state(pos)
 
     while True:
@@ -103,7 +72,7 @@ def adjust_cell(robot, cells, cell) -> bool:
 
         if key in ("\r", "\n"):
             cells[cell] = pos
-            CELLS_FILE.write_text(json.dumps(cells, indent=2))
+            CELLS_IK_FILE.write_text(json.dumps(cells, indent=2))
             print(f"\n  Saved {cell}.")
             return True
         elif key == "q":
@@ -113,53 +82,40 @@ def adjust_cell(robot, cells, cell) -> bool:
             test_sequence(robot, pos)
             print_state(pos)
             continue
-        elif key == "a":
-            pos["shoulder_pan"] = round(pos["shoulder_pan"] + STEP, 2)
-        elif key == "z":
-            pos["shoulder_pan"] = round(pos["shoulder_pan"] - STEP, 2)
         elif key == "w":
-            pos["shoulder_lift"] = round(pos["shoulder_lift"] + STEP, 2)
+            pos["x"] = round(pos["x"] + STEP, 6)
         elif key == "s":
-            pos["shoulder_lift"] = round(pos["shoulder_lift"] - STEP, 2)
-        elif key == "e":
-            pos["elbow_flex"] = round(pos["elbow_flex"] + STEP, 2)
+            pos["x"] = round(pos["x"] - STEP, 6)
+        elif key == "a":
+            pos["y"] = round(pos["y"] + STEP, 6)
         elif key == "d":
-            pos["elbow_flex"] = round(pos["elbow_flex"] - STEP, 2)
-        elif key == "r":
-            pos["wrist_flex"] = round(pos["wrist_flex"] + STEP, 2)
-        elif key == "f":
-            pos["wrist_flex"] = round(pos["wrist_flex"] - STEP, 2)
-        elif key == "u":
-            pos["wrist_roll"] = round(pos["wrist_roll"] + STEP, 2)
-        elif key == "j":
-            pos["wrist_roll"] = round(pos["wrist_roll"] - STEP, 2)
+            pos["y"] = round(pos["y"] - STEP, 6)
         else:
             continue
 
-        send(robot, pos)
+        move_to_xyz(robot, pos)
+        pos["hint"] = read_joints(robot)
         print_state(pos)
 
 
 def main():
-    if len(sys.argv) != 2 or sys.argv[1] not in list("abcdefgh"):
-        print("Usage: uv run python adjust_cell.py <column>  (e.g. d)")
-        return
-
-    col = sys.argv[1].lower()
-    cells = json.loads(CELLS_FILE.read_text())
+    cells = json.loads(CELLS_IK_FILE.read_text())
     robot = make_robot()
 
     try:
-        robot.connect()
-        print("Keys: a/z=shoulder_pan  w/s=shoulder_lift  e/d=elbow_flex  r/f=wrist_flex  u/j=wrist_roll  t=test  Enter=save & next  q=quit")
+        connect_robot(robot)
+        print("Keys: w/s=x±  a/d=y±  t=test  Enter=save  q=quit")
 
-        for row in range(1, 9):
-            if not adjust_cell(robot, cells, f"{col}{row}"):
+        cell = ask_cell()
+        while cell:
+            if not adjust_cell(robot, cells, cell):
                 break
+            cell = ask_cell()
 
         print("Done.")
 
     finally:
+        move_to_rest(robot)
         robot.disconnect()
 
 
